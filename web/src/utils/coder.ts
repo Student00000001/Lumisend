@@ -31,8 +31,8 @@ export function getDataCapacityBytes(settings: CodeSettings): number {
   
   // Calculate reserved cells
   const topLeftReserved = 7 * 7;
-  const topRightReserved = 3 * 3;
-  const bottomLeftReserved = 3 * 3;
+  const topRightReserved = 7 * 7;
+  const bottomLeftReserved = 7 * 7;
   const bottomRightReserved = 3 * 3;
   const reservedCells = topLeftReserved + topRightReserved + bottomLeftReserved + bottomRightReserved;
   
@@ -397,13 +397,13 @@ export function isReservedCell(
   // Top-left corner: 7x7
   if (x < 7 && y < 7) return true;
   
-  // Top-right corner: last 3 cols, first 3 rows
-  if (x >= w - 3 && y < 3) return true;
+  // Top-right corner: 7x7
+  if (x >= w - 7 && y < 7) return true;
   
-  // Bottom-left corner: first 3 cols, last 3 rows
-  if (x < 3 && y >= h - 3) return true;
+  // Bottom-left corner: 7x7
+  if (x < 7 && y >= h - 7) return true;
   
-  // Bottom-right corner: last 3 cols, last 3 rows
+  // Bottom-right corner: 3x3
   if (x >= w - 3 && y >= h - 3) return true;
   
   return false;
@@ -424,29 +424,46 @@ export function createGridFromFrame(
   
   // 1. Draw custom alignment shapes
   
-  // A. Top-left L-shape (Thick L pattern inside 7x7)
-  // Forms a thick (2 cell) inverted L-shape on the top-left using 7 (Black) & 0 (White)
+  // A. Top-left 7x7 concentric finder pattern
   for (let y = 0; y < 7; y++) {
     for (let x = 0; x < 7; x++) {
-      if ((y < 2 && x < 7) || (x < 2 && y < 7)) {
-        grid[y][x] = 7; // Black
+      if (x === 0 || x === 6 || y === 0 || y === 6) {
+        grid[y][x] = 7; // Black outer border
+      } else if (x === 1 || x === 5 || y === 1 || y === 5) {
+        grid[y][x] = 0; // White separation gap
       } else {
-        grid[y][x] = 0; // White buffer space
+        grid[y][x] = 7; // Black 3x3 core
       }
     }
   }
   
-  // B. Top-right marker: 3x3 solid block of black pixels
-  for (let y = 0; y < 3; y++) {
-    for (let x = w - 3; x < w; x++) {
-      grid[y][x] = 7;
+  // B. Top-right 7x7 concentric finder pattern
+  for (let y = 0; y < 7; y++) {
+    for (let x = w - 7; x < w; x++) {
+      const rx = x - (w - 7);
+      const ry = y;
+      if (rx === 0 || rx === 6 || ry === 0 || ry === 6) {
+        grid[y][x] = 7; // Black outer border
+      } else if (rx === 1 || rx === 5 || ry === 1 || ry === 5) {
+        grid[y][x] = 0; // White separation gap
+      } else {
+        grid[y][x] = 7; // Black 3x3 core
+      }
     }
   }
   
-  // C. Bottom-left marker: 3x3 solid block of black pixels
-  for (let y = h - 3; y < h; y++) {
-    for (let x = 0; x < 3; x++) {
-      grid[y][x] = 7;
+  // C. Bottom-left 7x7 concentric finder pattern
+  for (let y = h - 7; y < h; y++) {
+    for (let x = 0; x < 7; x++) {
+      const rx = x;
+      const ry = y - (h - 7);
+      if (rx === 0 || rx === 6 || ry === 0 || ry === 6) {
+        grid[y][x] = 7; // Black outer border
+      } else if (rx === 1 || rx === 5 || ry === 1 || ry === 5) {
+        grid[y][x] = 0; // White separation gap
+      } else {
+        grid[y][x] = 7; // Black 3x3 core
+      }
     }
   }
   
@@ -790,6 +807,84 @@ function lerp2D(
   return { x, y };
 }
 
+/**
+ * Evaluates a candidate point (cx, cy) to see how well it fits a concentric 7x7 finder pattern
+ */
+function evaluateFinderPatternScore(
+  pixelData: Uint8ClampedArray,
+  width: number,
+  height: number,
+  cx: number,
+  cy: number,
+  stepX: number,
+  stepY: number
+): number {
+  let sumCore = 0, countCore = 0;
+  let sumRing = 0, countRing = 0;
+  let sumBorder = 0, countBorder = 0;
+  
+  const cX_r = Math.round(cx);
+  const cY_r = Math.round(cy);
+  if (cX_r >= 0 && cX_r < width && cY_r >= 0 && cY_r < height) {
+    const cIdx = (cY_r * width + cX_r) * 4;
+    const cl = pixelData[cIdx] * 0.299 + pixelData[cIdx + 1] * 0.587 + pixelData[cIdx + 2] * 0.114;
+    sumCore += cl;
+    countCore++;
+  }
+  
+  const dirs = [
+    { x: 1, y: 0 }, { x: -1, y: 0 }, { x: 0, y: 1 }, { x: 0, y: -1 }
+  ];
+  
+  for (const d of dirs) {
+    // 1. Core region: sample at 0.5 and 1.0 step of cell distance from candidate center
+    for (const dist of [0.5, 1.0]) {
+      const px = Math.round(cx + d.x * dist * stepX);
+      const py = Math.round(cy + d.y * dist * stepY);
+      if (px >= 0 && px < width && py >= 0 && py < height) {
+        const idx = (py * width + px) * 4;
+        sumCore += pixelData[idx] * 0.299 + pixelData[idx+1] * 0.587 + pixelData[idx+2] * 0.114;
+        countCore++;
+      }
+    }
+    // 2. White separation ring: sample at 1.8 and 2.2 step
+    for (const dist of [1.8, 2.2]) {
+      const px = Math.round(cx + d.x * dist * stepX);
+      const py = Math.round(cy + d.y * dist * stepY);
+      if (px >= 0 && px < width && py >= 0 && py < height) {
+        const idx = (py * width + px) * 4;
+        sumRing += pixelData[idx] * 0.299 + pixelData[idx+1] * 0.587 + pixelData[idx+2] * 0.114;
+        countRing++;
+      }
+    }
+    // 3. Black outer border: sample at 3.0 and 3.4 step
+    for (const dist of [3.0, 3.4]) {
+      const px = Math.round(cx + d.x * dist * stepX);
+      const py = Math.round(cy + d.y * dist * stepY);
+      if (px >= 0 && px < width && py >= 0 && py < height) {
+        const idx = (py * width + px) * 4;
+        sumBorder += pixelData[idx] * 0.299 + pixelData[idx+1] * 0.587 + pixelData[idx+2] * 0.114;
+        countBorder++;
+      }
+    }
+  }
+  
+  if (countCore === 0 || countRing === 0 || countBorder === 0) return -Infinity;
+  
+  const avgCore = sumCore / countCore;
+  const avgRing = sumRing / countRing;
+  const avgBorder = sumBorder / countBorder;
+  
+  const ringCoreDiff = avgRing - avgCore;
+  const ringBorderDiff = avgRing - avgBorder;
+  
+  if (ringCoreDiff < 12 || ringBorderDiff < 12) {
+    return -Infinity;
+  }
+  
+  return ringCoreDiff + ringBorderDiff;
+}
+
 export function extractGridFromImage(
   pixelData: Uint8ClampedArray,
   width: number,
@@ -825,8 +920,6 @@ export function extractGridFromImage(
   }
   
   // --- STAGE 2: ULTRA-PRECISION 4-CORNER BILINEAR AUTO-LOCATOR ---
-  // Calculates the tilt, rotation, and skew of the 4 corners of the high-contrast white card,
-  // then performs perspective-correct bilinear grid center mapping!
   let minL = 255;
   let maxL = 0;
   const sampleStepX = Math.max(1, Math.floor(boxW / 40));
@@ -849,7 +942,96 @@ export function extractGridFromImage(
   let gridBR = { x: 0, y: 0 };
   let gridBL = { x: 0, y: 0 };
 
-  if (contrast >= 40) {
+  // --- STAGE 2.1: HIGH-SPEED CONCENTRIC FINDER PATTERN CORNER DETECTOR ---
+  const cellW_approx = boxW / w;
+  const cellH_approx = boxH / h;
+  
+  const estTL_x = startX + 3.5 * cellW_approx;
+  const estTL_y = startY + 3.5 * cellH_approx;
+  
+  const estTR_x = startX + (w - 3.5) * cellW_approx;
+  const estTR_y = startY + 3.5 * cellH_approx;
+  
+  const estBL_x = startX + 3.5 * cellW_approx;
+  const estBL_y = startY + (h - 3.5) * cellH_approx;
+  
+  let bestTL_pf = { x: estTL_x, y: estTL_y, score: -Infinity };
+  let bestTR_pf = { x: estTR_x, y: estTR_y, score: -Infinity };
+  let bestBL_pf = { x: estBL_x, y: estBL_y, score: -Infinity };
+  
+  // Scan a local window of cells around the expected positions
+  const searchRadiusX = Math.round(cellW_approx * 3.5);
+  const searchRadiusY = Math.round(cellH_approx * 3.5);
+  
+  // Search for Top-Left Center
+  for (let dy = -searchRadiusY; dy <= searchRadiusY; dy += 2) {
+    for (let dx = -searchRadiusX; dx <= searchRadiusX; dx += 2) {
+      const cx = estTL_x + dx;
+      const cy = estTL_y + dy;
+      if (cx >= startX && cx < startX + boxW && cy >= startY && cy < startY + boxH) {
+        const score = evaluateFinderPatternScore(pixelData, width, height, cx, cy, cellW_approx, cellH_approx);
+        if (score > bestTL_pf.score) {
+          bestTL_pf = { x: cx, y: cy, score };
+        }
+      }
+    }
+  }
+  
+  // Search for Top-Right Center
+  for (let dy = -searchRadiusY; dy <= searchRadiusY; dy += 2) {
+    for (let dx = -searchRadiusX; dx <= searchRadiusX; dx += 2) {
+      const cx = estTR_x + dx;
+      const cy = estTR_y + dy;
+      if (cx >= startX && cx < startX + boxW && cy >= startY && cy < startY + boxH) {
+        const score = evaluateFinderPatternScore(pixelData, width, height, cx, cy, cellW_approx, cellH_approx);
+        if (score > bestTR_pf.score) {
+          bestTR_pf = { x: cx, y: cy, score };
+        }
+      }
+    }
+  }
+  
+  // Search for Bottom-Left Center
+  for (let dy = -searchRadiusY; dy <= searchRadiusY; dy += 2) {
+    for (let dx = -searchRadiusX; dx <= searchRadiusX; dx += 2) {
+      const cx = estBL_x + dx;
+      const cy = estBL_y + dy;
+      if (cx >= startX && cx < startX + boxW && cy >= startY && cy < startY + boxH) {
+        const score = evaluateFinderPatternScore(pixelData, width, height, cx, cy, cellW_approx, cellH_approx);
+        if (score > bestBL_pf.score) {
+          bestBL_pf = { x: cx, y: cy, score };
+        }
+      }
+    }
+  }
+  
+  // Threshold score for local pattern locking
+  if (bestTL_pf.score >= 24 && bestTR_pf.score >= 24 && bestBL_pf.score >= 24) {
+    const x_tl = bestTL_pf.x;
+    const y_tl = bestTL_pf.y;
+    const x_tr = bestTR_pf.x;
+    const y_tr = bestTR_pf.y;
+    const x_bl = bestBL_pf.x;
+    const y_bl = bestBL_pf.y;
+    
+    // Affine scale coefficients
+    const a = (x_tr - x_tl) / (w - 7);
+    const b = (x_bl - x_tl) / (h - 7);
+    const c = x_tl - a * 3.5 - b * 3.5;
+    
+    const d = (y_tr - y_tl) / (w - 7);
+    const e = (y_bl - y_tl) / (h - 7);
+    const f = y_tl - d * 3.5 - e * 3.5;
+    
+    // Extrapolate perfect outer boundary corners for bilinear sampler
+    gridTL = { x: c, y: f };
+    gridTR = { x: a * w + c, y: d * w + f };
+    gridBR = { x: a * w + b * h + c, y: d * w + e * h + f };
+    gridBL = { x: b * h + c, y: e * h + f };
+    
+    useBilinearMapping = true;
+  } else if (contrast >= 40) {
+    // --- STAGE 2.2: RECTANGULAR CARD AUTO-LOCATOR FALLBACK ---
     const brightThreshold = minL + contrast * 0.52;
     
     let bestTL = { x: startX + boxW, y: startY + boxH, score: Infinity };   // minimizes x + y
@@ -865,7 +1047,6 @@ export function extractGridFromImage(
     const scanY2 = startY + boxH - padBorderY;
 
     let foundAny = false;
-    // Walk pixels on a tight grid to locate custom rectangular boundary corners
     for (let y = scanY1; y < scanY2; y += 2) {
       for (let x = scanX1; x < scanX2; x += 2) {
         if (x < 0 || x >= width || y < 0 || y >= height) continue;
@@ -873,7 +1054,6 @@ export function extractGridFromImage(
         const l = pixelData[idx] * 0.299 + pixelData[idx + 1] * 0.587 + pixelData[idx + 2] * 0.114;
         
         if (l >= brightThreshold) {
-          // Check 3x3 pattern to ensure it's a solid section and reject single pixel glitter/reflections
           let isSolid = true;
           const neighbors = [
             { dx: -2, dy: 0 }, { dx: 2, dy: 0 }, { dx: 0, dy: -2 }, { dx: 0, dy: 2 }
@@ -913,8 +1093,6 @@ export function extractGridFromImage(
     const cardH = bestBL.y - bestTL.y;
 
     if (foundAny && cardW > boxW * 0.18 && cardH > boxH * 0.18) {
-      // Calculate layout properties for exact internal grid extraction
-      // card width = w * 12 + 48; card height = h * 12 + 48; quietZone = 24.
       const padXFraction = 24 / (w * 12 + 48);
       const padYFraction = 24 / (h * 12 + 48);
 
