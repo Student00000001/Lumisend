@@ -509,10 +509,7 @@ export function createGridFromFrame(
   return grid;
 }
 
-/**
- * Read the bits from an extracted 2D grid and reconstruct the flat byte stream
- */
-export function decodeFrameFromGrid(
+function decodeFrameFromGridSingle(
   grid: number[][],
   settings: CodeSettings
 ): TransitFrame | null {
@@ -564,6 +561,29 @@ export function decodeFrameFromGrid(
   
   // Reconstruct frame object
   return deserializeFrame(dataBytes, settings);
+}
+
+/**
+ * Read the bits from an extracted 2D grid and reconstruct the flat byte stream
+ */
+export function decodeFrameFromGrid(
+  grid: number[][],
+  settings: CodeSettings
+): TransitFrame | null {
+  // 1. Try decoding the camera feed as-is
+  const normalResult = decodeFrameFromGridSingle(grid, settings);
+  if (normalResult) {
+    return normalResult;
+  }
+
+  // 2. Try decoding with a horizontally reversed grid (for mirrored front-facing cameras)
+  const mirroredGrid = grid.map(row => {
+    const rx = [...row];
+    rx.reverse();
+    return rx;
+  });
+  
+  return decodeFrameFromGridSingle(mirroredGrid, settings);
 }
 
 /**
