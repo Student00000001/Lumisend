@@ -885,6 +885,33 @@ function evaluateFinderPatternScore(
   return ringCoreDiff + ringBorderDiff;
 }
 
+// Cramer's rule direct 3-point affine linear solver mapping (col, row) -> (x, y)
+export function solveAffine3Points(
+  col1: number, row1: number, x1: number, y1: number,
+  col2: number, row2: number, x2: number, y2: number,
+  col3: number, row3: number, x3: number, y3: number
+): { a: number; b: number; c: number; d: number; e: number; f: number } | null {
+  const det = col1 * (row2 - row3) - row1 * (col2 - col3) + (col2 * row3 - col3 * row2);
+  if (Math.abs(det) < 1e-6) return null;
+
+  const detA = x1 * (row2 - row3) - row1 * (x2 - x3) + (x2 * row3 - x3 * row2);
+  const detB = col1 * (x2 - x3) - x1 * (col2 - col3) + (col2 * x3 - col3 * x2);
+  const detC = col1 * (row2 * x3 - row3 * x2) - row1 * (col2 * x3 - col3 * x2) + x1 * (col2 * row3 - col3 * row2);
+
+  const detD = y1 * (row2 - row3) - row1 * (y2 - y3) + (y2 * row3 - y3 * row2);
+  const detE = col1 * (y2 - y3) - y1 * (col2 - col3) + (col2 * y3 - col3 * y2);
+  const detF = col1 * (row2 * y3 - row3 * y2) - row1 * (col2 * y3 - col3 * y2) + y1 * (col2 * row3 - col3 * row2);
+
+  return {
+    a: detA / det,
+    b: detB / det,
+    c: detC / det,
+    d: detD / det,
+    e: detE / det,
+    f: detF / det
+  };
+}
+
 export function extractGridFromImage(
   pixelData: Uint8ClampedArray,
   width: number,
@@ -943,21 +970,26 @@ export function extractGridFromImage(
   let gridBL = { x: 0, y: 0 };
 
   // --- STAGE 2.1: HIGH-SPEED CONCENTRIC FINDER PATTERN CORNER DETECTOR ---
-  const cellW_approx = boxW / w;
-  const cellH_approx = boxH / h;
+  // Card size includes 2 cells of quiet zone on left/right and 2 on top/bottom
+  const cellW_approx = boxW / (w + 4);
+  const cellH_approx = boxH / (h + 4);
   
-  const estTL_x = startX + 3.5 * cellW_approx;
-  const estTL_y = startY + 3.5 * cellH_approx;
+  const estTL_x = startX + 5.5 * cellW_approx;
+  const estTL_y = startY + 5.5 * cellH_approx;
   
-  const estTR_x = startX + (w - 3.5) * cellW_approx;
-  const estTR_y = startY + 3.5 * cellH_approx;
+  const estTR_x = startX + (w - 1.5) * cellW_approx;
+  const estTR_y = startY + 5.5 * cellH_approx;
   
-  const estBL_x = startX + 3.5 * cellW_approx;
-  const estBL_y = startY + (h - 3.5) * cellH_approx;
+  const estBL_x = startX + 5.5 * cellW_approx;
+  const estBL_y = startY + (h - 1.5) * cellH_approx;
+
+  const estBR_x = startX + (w - 1.5) * cellW_approx;
+  const estBR_y = startY + (h - 1.5) * cellH_approx;
   
   let bestTL_pf = { x: estTL_x, y: estTL_y, score: -Infinity };
   let bestTR_pf = { x: estTR_x, y: estTR_y, score: -Infinity };
   let bestBL_pf = { x: estBL_x, y: estBL_y, score: -Infinity };
+  let bestBR_pf = { x: estBR_x, y: estBR_y, score: -Infinity };
   
   // Scan a local window of cells around the expected positions
   const searchRadiusX = Math.round(cellW_approx * 3.5);
@@ -1004,9 +1036,26 @@ export function extractGridFromImage(
       }
     }
   }
+
+  // Search for Bottom-Right Center
+  for (let dy = -searchRadiusY; dy <= searchRadiusY; dy += 2) {
+    for (let dx = -searchRadiusX; dx <= searchRadiusX; dx += 2) {
+      const cx = estBR_x + dx;
+      const cy = estBR_y + dy;
+      if (cx >= startX && cx < startX + boxW && cy >= startY && cy < startY + boxH) {
+        const score = evaluateFinderPatternScore(pixelData, width, height, cx, cy, cellW_approx, cellH_approx);
+        if (score > bestBR_pf.score) {
+          bestBR_pf = { x: cx, y: cy, score };
+        }
+      }
+    }
+  }
   
-  // Threshold score for local pattern locking
-  if (bestTL_pf.score >= 24 && bestTR_pf.score >= 24 && bestBL_pf.score >= 24) {
+  // Adaptive pattern recognition selector threshold
+  const patternScoreThreshold = 22;
+  
+  if (bestTL_pf.score >= patternScoreThreshold && bestTR_pf.score >= patternScoreThreshold && bestBL_pf.score >= patternScoreThreshold) {
+    // Case 1: Standard upright orientation (unmirrored background lens)
     const x_tl = bestTL_pf.x;
     const y_tl = bestTL_pf.y;
     const x_tr = bestTR_pf.x;
@@ -1014,7 +1063,7 @@ export function extractGridFromImage(
     const x_bl = bestBL_pf.x;
     const y_bl = bestBL_pf.y;
     
-    // Affine scale coefficients
+    // Affine scale coefficients to map active grid coordinates directly
     const a = (x_tr - x_tl) / (w - 7);
     const b = (x_bl - x_tl) / (h - 7);
     const c = x_tl - a * 3.5 - b * 3.5;
@@ -1030,6 +1079,58 @@ export function extractGridFromImage(
     gridBL = { x: b * h + c, y: e * h + f };
     
     useBilinearMapping = true;
+  } else if (bestTL_pf.score >= patternScoreThreshold && bestTR_pf.score >= patternScoreThreshold && bestBR_pf.score >= patternScoreThreshold) {
+    // Case 2: Horizontally mirrored orientation (front-facing webcam mirror)
+    // - bestTR_pf maps to grid (3.5, 3.5)
+    // - bestTL_pf maps to grid (w - 3.5, 3.5)
+    // - bestBR_pf maps to grid (3.5, h - 3.5)
+    const x1_img = bestTR_pf.x;
+    const y1_img = bestTR_pf.y;
+    const x2_img = bestTL_pf.x;
+    const y2_img = bestTL_pf.y;
+    const x3_img = bestBR_pf.x;
+    const y3_img = bestBR_pf.y;
+
+    const aff = solveAffine3Points(
+      3.5, 3.5, x1_img, y1_img,
+      w - 3.5, 3.5, x2_img, y2_img,
+      3.5, h - 3.5, x3_img, y3_img
+    );
+
+    if (aff) {
+      gridTL = { x: aff.c, y: aff.f };
+      gridTR = { x: aff.a * w + aff.c, y: aff.d * w + aff.f };
+      gridBR = { x: aff.a * w + aff.b * h + aff.c, y: aff.d * w + aff.e * h + aff.f };
+      gridBL = { x: aff.b * h + aff.c, y: aff.e * h + aff.f };
+      
+      useBilinearMapping = true;
+    }
+  } else if (bestBL_pf.score >= patternScoreThreshold && bestBR_pf.score >= patternScoreThreshold && bestTL_pf.score >= patternScoreThreshold) {
+    // Case 3: Vertically mirrored or inverted orientation
+    // - bestBL_pf matches grid (3.5, 3.5)
+    // - bestBR_pf matches grid (w - 3.5, 3.5)
+    // - bestTL_pf matches grid (3.5, h - 3.5)
+    const x1_img = bestBL_pf.x;
+    const y1_img = bestBL_pf.y;
+    const x2_img = bestBR_pf.x;
+    const y2_img = bestBR_pf.y;
+    const x3_img = bestTL_pf.x;
+    const y3_img = bestTL_pf.y;
+
+    const aff = solveAffine3Points(
+      3.5, 3.5, x1_img, y1_img,
+      w - 3.5, 3.5, x2_img, y2_img,
+      3.5, h - 3.5, x3_img, y3_img
+    );
+
+    if (aff) {
+      gridTL = { x: aff.c, y: aff.f };
+      gridTR = { x: aff.a * w + aff.c, y: aff.d * w + aff.f };
+      gridBR = { x: aff.a * w + aff.b * h + aff.c, y: aff.d * w + aff.e * h + aff.f };
+      gridBL = { x: aff.b * h + aff.c, y: aff.e * h + aff.f };
+      
+      useBilinearMapping = true;
+    }
   } else if (contrast >= 40) {
     // --- STAGE 2.2: RECTANGULAR CARD AUTO-LOCATOR FALLBACK ---
     const brightThreshold = minL + contrast * 0.52;
