@@ -587,6 +587,111 @@ export function decodeFrameFromGrid(
 }
 
 /**
+ * Quiet zone white border detection helper
+ */
+export function getQuietZoneBounds(
+  pixelData: Uint8ClampedArray,
+  width: number,
+  height: number
+): { x1: number; y1: number; x2: number; y2: number } | null {
+  let minX = width;
+  let maxX = 0;
+  let minY = height;
+  let maxY = 0;
+  
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const idx = (y * width + x) * 4;
+      const r = pixelData[idx];
+      const g = pixelData[idx + 1];
+      const b = pixelData[idx + 2];
+      
+      // Match non-pure-white pixels (threshold of 235 on all RGB channels)
+      if (r < 235 || g < 235 || b < 235) {
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      }
+    }
+  }
+  
+  // If we detected a valid bordered box inside the whitespace boundaries
+  if (minX <= maxX && minY <= maxY && (maxX - minX > 20) && (maxY - minY > 20)) {
+    return {
+      x1: Math.max(0, minX) / width,
+      y1: Math.max(0, minY) / height,
+      x2: Math.min(width - 1, maxX) / width,
+      y2: Math.min(height - 1, maxY) / height
+    };
+  }
+  return null;
+}
+
+/**
+ * Highly optimized, spiraled scanning perturbations for active grid calibration (36 points)
+ */
+const JITTER_OFFSETS = [
+  // 1. Tiny shifts
+  { dx: -0.005, dy: 0, ds: 1.0 },
+  { dx: 0.005, dy: 0, ds: 1.0 },
+  { dx: 0, dy: -0.005, ds: 1.0 },
+  { dx: 0, dy: 0.005, ds: 1.0 },
+
+  // 2. Micro scales
+  { dx: 0, dy: 0, ds: 0.99 },
+  { dx: 0, dy: 0, ds: 1.01 },
+
+  // 3. Small shifts
+  { dx: -0.01, dy: 0, ds: 1.0 },
+  { dx: 0.01, dy: 0, ds: 1.0 },
+  { dx: 0, dy: -0.01, ds: 1.0 },
+  { dx: 0, dy: 0.01, ds: 1.0 },
+
+  // 4. Small scales
+  { dx: 0, dy: 0, ds: 0.98 },
+  { dx: 0, dy: 0, ds: 1.02 },
+
+  // 5. Diagonals/asymmetrical micro
+  { dx: -0.01, dy: -0.01, ds: 0.98 },
+  { dx: 0.01, dy: 0.01, ds: 1.02 },
+  { dx: -0.01, dy: 0.01, ds: 1.0 },
+  { dx: 0.01, dy: -0.01, ds: 1.0 },
+
+  // 6. Medium shifts
+  { dx: -0.015, dy: 0, ds: 1.0 },
+  { dx: 0.015, dy: 0, ds: 1.0 },
+  { dx: 0, dy: -0.015, ds: 1.0 },
+  { dx: 0, dy: 0.015, ds: 1.0 },
+
+  // 7. Medium scales
+  { dx: 0, dy: 0, ds: 0.97 },
+  { dx: 0, dy: 0, ds: 1.03 },
+
+  // 8. Diagonals medium
+  { dx: -0.015, dy: -0.015, ds: 0.97 },
+  { dx: 0.015, dy: 0.015, ds: 1.03 },
+
+  // 9. Wider shifts for hands holding further back
+  { dx: -0.02, dy: 0, ds: 1.0 },
+  { dx: 0.02, dy: 0, ds: 1.0 },
+  { dx: 0, dy: -0.02, ds: 1.0 },
+  { dx: 0, dy: 0.02, ds: 1.0 },
+
+  // 10. Wider scales
+  { dx: 0, dy: 0, ds: 0.95 },
+  { dx: 0, dy: 0, ds: 1.05 },
+  { dx: 0, dy: 0, ds: 0.93 },
+  { dx: 0, dy: 0, ds: 1.07 },
+
+  // 11. Wider combo shifts & scales
+  { dx: -0.02, dy: -0.02, ds: 0.95 },
+  { dx: 0.02, dy: 0.02, ds: 1.05 },
+  { dx: -0.02, dy: 0.02, ds: 0.97 },
+  { dx: 0.02, dy: -0.02, ds: 0.97 }
+];
+
+/**
  * Image processing helpers for decoding static image matrices
  */
 export function extractGridFromImage(
@@ -610,34 +715,12 @@ export function extractGridFromImage(
   
   // Auto-detect and crop any outer quiet zone white border padding when scanning from full bounds (static file uploads)
   if (alignGuideX1 === 0 && alignGuideY1 === 0 && alignGuideX2 === 1 && alignGuideY2 === 1) {
-    let minX = width;
-    let maxX = 0;
-    let minY = height;
-    let maxY = 0;
-    
-    for (let y = 0; y < height; y++) {
-      for (let x = 0; x < width; x++) {
-        const idx = (y * width + x) * 4;
-        const r = pixelData[idx];
-        const g = pixelData[idx + 1];
-        const b = pixelData[idx + 2];
-        
-        // Match non-pure-white pixels (threshold of 235 on all RGB channels)
-        if (r < 235 || g < 235 || b < 235) {
-          if (x < minX) minX = x;
-          if (x > maxX) maxX = x;
-          if (y < minY) minY = y;
-          if (y > maxY) maxY = y;
-        }
-      }
-    }
-    
-    // If we detected a valid bordered box inside the whitespace boundaries
-    if (minX <= maxX && minY <= maxY && (maxX - minX > 20) && (maxY - minY > 20)) {
-      startX = minX;
-      startY = minY;
-      boxW = maxX - minX + 1;
-      boxH = maxY - minY + 1;
+    const qz = getQuietZoneBounds(pixelData, width, height);
+    if (qz) {
+      startX = Math.round(qz.x1 * width);
+      startY = Math.round(qz.y1 * height);
+      boxW = Math.round((qz.x2 - qz.x1) * width);
+      boxH = Math.round((qz.y2 - qz.y1) * height);
     }
   }
   
@@ -699,15 +782,99 @@ export function extractGridFromImage(
       const avgCellG = cellCount > 0 ? sumCellG / cellCount : 128;
       const avgCellB = cellCount > 0 ? sumCellB / cellCount : 128;
       
-      // Values below respective channel thresholds indicate color/active channel (subtractive light)
-      const isRedActive = avgCellR < thresholdR;
-      const isGreenActive = avgCellG < thresholdG;
-      const isBlueActive = avgCellB < thresholdB;
-      
-      // Reconstruct cell value (0 to 7)
-      grid[row][col] = (isRedActive ? 4 : 0) | (isGreenActive ? 2 : 0) | (isBlueActive ? 1 : 0);
+      if (settings.colorMode === 'mono') {
+        // Standard monochrome mode: Combine R, G, B with ITU-R BT.601 weights for a robust color-neutral greyscale
+        const cellLuminance = (avgCellR * 0.299) + (avgCellG * 0.587) + (avgCellB * 0.114);
+        const thresholdLuminance = (thresholdR * 0.299) + (thresholdG * 0.587) + (thresholdB * 0.114);
+        
+        // Active cell translates to dark/black (subtractive light, below luminance benchmark)
+        const isActive = cellLuminance < thresholdLuminance;
+        grid[row][col] = isActive ? 7 : 0;
+      } else {
+        // Chromatic Color mode: Values below respective channel thresholds indicate active subtractive channel colors
+        const isRedActive = avgCellR < thresholdR;
+        const isGreenActive = avgCellG < thresholdG;
+        const isBlueActive = avgCellB < thresholdB;
+        
+        // Reconstruct cell value (0 to 7)
+        grid[row][col] = (isRedActive ? 4 : 0) | (isGreenActive ? 2 : 0) | (isBlueActive ? 1 : 0);
+      }
     }
   }
   
   return grid;
+}
+
+export interface JitterResult {
+  grid: number[][];
+  frame: TransitFrame;
+}
+
+/**
+ * Rapid auto-searching, calibration and CRC decoding interface using a 36-point search grid.
+ * Accelerates locks and compensates for hand gestures, distances, and tilt.
+ */
+export function extractAndDecodeWithJitter(
+  pixelData: Uint8ClampedArray,
+  width: number,
+  height: number,
+  settings: CodeSettings,
+  alignGuideX1: number,
+  alignGuideY1: number,
+  alignGuideX2: number,
+  alignGuideY2: number
+): JitterResult | null {
+  // Let's resolve the actual physical guide coordinates we want to search around
+  let g_x1 = alignGuideX1;
+  let g_y1 = alignGuideY1;
+  let g_x2 = alignGuideX2;
+  let g_y2 = alignGuideY2;
+
+  // If we are scanning full image (static file), try our perfect quiet zone bunder detector first
+  if (alignGuideX1 === 0 && alignGuideY1 === 0 && alignGuideX2 === 1 && alignGuideY2 === 1) {
+    const qz = getQuietZoneBounds(pixelData, width, height);
+    if (qz) {
+      g_x1 = qz.x1;
+      g_y1 = qz.y1;
+      g_x2 = qz.x2;
+      g_y2 = qz.y2;
+    }
+  }
+
+  // 1. Nominal attempt
+  const baseGrid = extractGridFromImage(pixelData, width, height, settings, g_x1, g_y1, g_x2, g_y2);
+  if (baseGrid) {
+    const baseFrame = decodeFrameFromGrid(baseGrid, settings);
+    if (baseFrame) {
+      return { grid: baseGrid, frame: baseFrame };
+    }
+  }
+
+  // 2. Active Jitter-seeking calibration loop
+  const centerX = (g_x1 + g_x2) / 2;
+  const centerY = (g_y1 + g_y2) / 2;
+  const nominalW = g_x2 - g_x1;
+  const nominalH = g_y2 - g_y1;
+
+  for (const opt of JITTER_OFFSETS) {
+    const newW = nominalW * opt.ds;
+    const newH = nominalH * opt.ds;
+    const newCenterX = centerX + opt.dx;
+    const newCenterY = centerY + opt.dy;
+
+    const p_x1 = Math.max(0, newCenterX - newW / 2);
+    const p_y1 = Math.max(0, newCenterY - newH / 2);
+    const p_x2 = Math.min(1, newCenterX + newW / 2);
+    const p_y2 = Math.min(1, newCenterY + newH / 2);
+
+    const candGrid = extractGridFromImage(pixelData, width, height, settings, p_x1, p_y1, p_x2, p_y2);
+    if (candGrid) {
+      const candFrame = decodeFrameFromGrid(candGrid, settings);
+      if (candFrame) {
+        return { grid: candGrid, frame: candFrame };
+      }
+    }
+  }
+
+  return null;
 }

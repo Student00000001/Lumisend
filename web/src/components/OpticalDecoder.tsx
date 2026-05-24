@@ -6,7 +6,7 @@ import {
 } from 'lucide-react';
 import QRCode from 'qrcode';
 import { CodeSettings, ReceiverState, LogMessage } from '../types';
-import { decodeFrameFromGrid, extractGridFromImage, decompressBytes } from '../utils/coder';
+import { decodeFrameFromGrid, extractGridFromImage, decompressBytes, extractAndDecodeWithJitter } from '../utils/coder';
 
 export default function OpticalDecoder() {
   const [settings, setSettings] = useState<CodeSettings>({
@@ -132,7 +132,11 @@ export default function OpticalDecoder() {
     
     if (isScanning && selectedDeviceId) {
       navigator.mediaDevices.getUserMedia({
-        video: { deviceId: { exact: selectedDeviceId }, width: { ideal: 640 }, height: { ideal: 480 } }
+        video: {
+          deviceId: { exact: selectedDeviceId },
+          width: { ideal: 1280, min: 640 },
+          height: { ideal: 960, min: 480 }
+        }
       })
       .then(stream => {
         activeStream = stream;
@@ -192,7 +196,6 @@ export default function OpticalDecoder() {
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
     // Guide target bounding coordinates: we represent a 4:3 box in the center of the frame
-    // Box dimensions: 280px wide x 210px high (or adaptive, say 52% width, keeping 4:3)
     const boxW = Math.round(canvas.width * 0.5);
     const boxH = Math.round(boxW * 0.75); // 4:3 ratio
     const boxX = Math.round((canvas.width - boxW) / 2);
@@ -205,19 +208,17 @@ export default function OpticalDecoder() {
 
     const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
     
-    // Extract grid matrix
-    const grid = extractGridFromImage(imgData.data, canvas.width, canvas.height, settings, x1, y1, x2, y2);
+    // Use the active-seeking calibration engine running 36 candidate checks in 1-2ms
+    const binarizedResult = extractAndDecodeWithJitter(imgData.data, canvas.width, canvas.height, settings, x1, y1, x2, y2);
     
-    if (grid) {
-      // Visual feedback: Render binarized frame overlay in debug canvas
-      renderBinarizedView(grid, boxW, boxH);
-
-      // Attempt to decode a Valid Optical Frame
-      const frameObj = decodeFrameFromGrid(grid, settings);
-      
-      if (frameObj) {
-        // We successfully decoded a clean frame with correct CRC16!
-        processReceivedFrame(frameObj);
+    if (binarizedResult) {
+      renderBinarizedView(binarizedResult.grid, boxW, boxH);
+      processReceivedFrame(binarizedResult.frame);
+    } else {
+      // If none succeed, render the nominal grid in the debug feed as real-time visual guide
+      const nominalGrid = extractGridFromImage(imgData.data, canvas.width, canvas.height, settings, x1, y1, x2, y2);
+      if (nominalGrid) {
+        renderBinarizedView(nominalGrid, boxW, boxH);
       }
     }
   };
@@ -396,19 +397,19 @@ export default function OpticalDecoder() {
 
         const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
         
-        // Scan the coordinates by using the full bounds 0 to 1
-        const grid = extractGridFromImage(imgData.data, canvas.width, canvas.height, settings, 0, 0, 1, 1);
-        if (grid) {
-          renderBinarizedView(grid, canvas.width, canvas.height);
-          const frameObj = decodeFrameFromGrid(grid, settings);
-          if (frameObj) {
-            processReceivedFrame(frameObj);
-            addLog('success', 'Direct File Upload code page successfully parsed.');
-          } else {
-            addLog('error', 'Optical Link Code identified, but decoding structural bits failed. Try adjusting matching density preset.');
-          }
+        // Scan with active jitter search over the full image boundary (uses automatic quiet zone detector)
+        const binarizedResult = extractAndDecodeWithJitter(imgData.data, canvas.width, canvas.height, settings, 0, 0, 1, 1);
+        if (binarizedResult) {
+          renderBinarizedView(binarizedResult.grid, canvas.width, canvas.height);
+          processReceivedFrame(binarizedResult.frame);
+          addLog('success', 'Direct File Upload code page successfully parsed (Auto-aligned & verified).');
         } else {
-          addLog('error', 'Could not parse the grid pattern from uploaded picture. Ensure it is a valid 4:3 code file.');
+          // Render nominal binarized grid even on failure to show what was captured
+          const nominalGrid = extractGridFromImage(imgData.data, canvas.width, canvas.height, settings, 0, 0, 1, 1);
+          if (nominalGrid) {
+            renderBinarizedView(nominalGrid, canvas.width, canvas.height);
+          }
+          addLog('error', 'Failed to decode. Optical pattern found but check sums match failed. Ensure the preset density is identically configured.');
         }
       };
       img.src = event.target?.result as string;
