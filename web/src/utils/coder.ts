@@ -603,10 +603,43 @@ export function extractGridFromImage(
   const h = settings.gridHeight;
   
   // Step 1: Crop to the specified green overlay box
-  const startX = Math.round(alignGuideX1 * width);
-  const startY = Math.round(alignGuideY1 * height);
-  const boxW = Math.round((alignGuideX2 - alignGuideX1) * width);
-  const boxH = Math.round((alignGuideY2 - alignGuideY1) * height);
+  let startX = Math.round(alignGuideX1 * width);
+  let startY = Math.round(alignGuideY1 * height);
+  let boxW = Math.round((alignGuideX2 - alignGuideX1) * width);
+  let boxH = Math.round((alignGuideY2 - alignGuideY1) * height);
+  
+  // Auto-detect and crop any outer quiet zone white border padding when scanning from full bounds (static file uploads)
+  if (alignGuideX1 === 0 && alignGuideY1 === 0 && alignGuideX2 === 1 && alignGuideY2 === 1) {
+    let minX = width;
+    let maxX = 0;
+    let minY = height;
+    let maxY = 0;
+    
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const idx = (y * width + x) * 4;
+        const r = pixelData[idx];
+        const g = pixelData[idx + 1];
+        const b = pixelData[idx + 2];
+        
+        // Match non-pure-white pixels (threshold of 235 on all RGB channels)
+        if (r < 235 || g < 235 || b < 235) {
+          if (x < minX) minX = x;
+          if (x > maxX) maxX = x;
+          if (y < minY) minY = y;
+          if (y > maxY) maxY = y;
+        }
+      }
+    }
+    
+    // If we detected a valid bordered box inside the whitespace boundaries
+    if (minX <= maxX && minY <= maxY && (maxX - minX > 20) && (maxY - minY > 20)) {
+      startX = minX;
+      startY = minY;
+      boxW = maxX - minX + 1;
+      boxH = maxY - minY + 1;
+    }
+  }
   
   if (boxW <= 10 || boxH <= 10 || startX < 0 || startY < 0 || startX + boxW > width || startY + boxH > height) {
     return null;

@@ -475,7 +475,8 @@ export default function OpticalDecoder() {
               <div className="relative w-full h-full flex items-center justify-center" id="viewport-scanner-frame">
                 <video 
                   ref={videoRef}
-                  className="absolute inset-0 w-full h-full object-cover scale-x-[-1]"
+                  className="absolute inset-0 w-full h-full"
+                  style={{ transform: 'scaleX(-1)', objectFit: 'cover' }}
                   playsInline
                   muted
                   autoPlay
