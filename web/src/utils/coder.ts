@@ -774,6 +774,22 @@ const JITTER_OFFSETS = [
 /**
  * Image processing helpers for decoding static image matrices
  */
+/**
+ * Helper to perform bilinear interpolation of 4 quadrilateral points
+ */
+function lerp2D(
+  TL: { x: number; y: number },
+  TR: { x: number; y: number },
+  BR: { x: number; y: number },
+  BL: { x: number; y: number },
+  u: number,
+  v: number
+): { x: number; y: number } {
+  const x = (1 - u) * (1 - v) * TL.x + u * (1 - v) * TR.x + u * v * BR.x + (1 - u) * v * BL.x;
+  const y = (1 - u) * (1 - v) * TL.y + u * (1 - v) * TR.y + u * v * BR.y + (1 - u) * v * BL.y;
+  return { x, y };
+}
+
 export function extractGridFromImage(
   pixelData: Uint8ClampedArray,
   width: number,
@@ -808,6 +824,109 @@ export function extractGridFromImage(
     return null;
   }
   
+  // --- STAGE 2: ULTRA-PRECISION 4-CORNER BILINEAR AUTO-LOCATOR ---
+  // Calculates the tilt, rotation, and skew of the 4 corners of the high-contrast white card,
+  // then performs perspective-correct bilinear grid center mapping!
+  let minL = 255;
+  let maxL = 0;
+  const sampleStepX = Math.max(1, Math.floor(boxW / 40));
+  const sampleStepY = Math.max(1, Math.floor(boxH / 40));
+  for (let y = startY; y < startY + boxH; y += sampleStepY) {
+    for (let x = startX; x < startX + boxW; x += sampleStepX) {
+      if (x < 0 || x >= width || y < 0 || y >= height) continue;
+      const idx = (y * width + x) * 4;
+      const l = pixelData[idx] * 0.299 + pixelData[idx + 1] * 0.587 + pixelData[idx + 2] * 0.114;
+      if (l < minL) minL = l;
+      if (l > maxL) maxL = l;
+    }
+  }
+
+  const contrast = maxL - minL;
+  let useBilinearMapping = false;
+  
+  let gridTL = { x: 0, y: 0 };
+  let gridTR = { x: 0, y: 0 };
+  let gridBR = { x: 0, y: 0 };
+  let gridBL = { x: 0, y: 0 };
+
+  if (contrast >= 40) {
+    const brightThreshold = minL + contrast * 0.52;
+    
+    let bestTL = { x: startX + boxW, y: startY + boxH, score: Infinity };   // minimizes x + y
+    let bestTR = { x: startX, y: startY + boxH, score: -Infinity };          // maximizes x - y
+    let bestBR = { x: startX, y: startY, score: -Infinity };                 // maximizes x + y
+    let bestBL = { x: startX + boxW, y: startY, score: Infinity };          // minimizes x - y
+
+    const padBorderX = Math.max(4, Math.floor(boxW * 0.03));
+    const padBorderY = Math.max(4, Math.floor(boxH * 0.03));
+    const scanX1 = startX + padBorderX;
+    const scanX2 = startX + boxW - padBorderX;
+    const scanY1 = startY + padBorderY;
+    const scanY2 = startY + boxH - padBorderY;
+
+    let foundAny = false;
+    // Walk pixels on a tight grid to locate custom rectangular boundary corners
+    for (let y = scanY1; y < scanY2; y += 2) {
+      for (let x = scanX1; x < scanX2; x += 2) {
+        if (x < 0 || x >= width || y < 0 || y >= height) continue;
+        const idx = (y * width + x) * 4;
+        const l = pixelData[idx] * 0.299 + pixelData[idx + 1] * 0.587 + pixelData[idx + 2] * 0.114;
+        
+        if (l >= brightThreshold) {
+          // Check 3x3 pattern to ensure it's a solid section and reject single pixel glitter/reflections
+          let isSolid = true;
+          const neighbors = [
+            { dx: -2, dy: 0 }, { dx: 2, dy: 0 }, { dx: 0, dy: -2 }, { dx: 0, dy: 2 }
+          ];
+          for (const n of neighbors) {
+            const nx = x + n.dx;
+            const ny = y + n.dy;
+            if (nx < 0 || nx >= width || ny < 0 || ny >= height) {
+              isSolid = false;
+              break;
+            }
+            const nidx = (ny * width + nx) * 4;
+            const nl = pixelData[nidx] * 0.299 + pixelData[nidx + 1] * 0.587 + pixelData[nidx + 2] * 0.114;
+            if (nl < brightThreshold) {
+              isSolid = false;
+              break;
+            }
+          }
+
+          if (!isSolid) continue;
+          foundAny = true;
+
+          const scoreTL = x + y;
+          const scoreTR = x - y;
+          const scoreBR = x + y;
+          const scoreBL = x - y;
+
+          if (scoreTL < bestTL.score) bestTL = { x, y, score: scoreTL };
+          if (scoreTR > bestTR.score) bestTR = { x, y, score: scoreTR };
+          if (scoreBR > bestBR.score) bestBR = { x, y, score: scoreBR };
+          if (scoreBL < bestBL.score) bestBL = { x, y, score: scoreBL };
+        }
+      }
+    }
+
+    const cardW = bestTR.x - bestTL.x;
+    const cardH = bestBL.y - bestTL.y;
+
+    if (foundAny && cardW > boxW * 0.18 && cardH > boxH * 0.18) {
+      // Calculate layout properties for exact internal grid extraction
+      // card width = w * 12 + 48; card height = h * 12 + 48; quietZone = 24.
+      const padXFraction = 24 / (w * 12 + 48);
+      const padYFraction = 24 / (h * 12 + 48);
+
+      gridTL = lerp2D(bestTL, bestTR, bestBR, bestBL, padXFraction, padYFraction);
+      gridTR = lerp2D(bestTL, bestTR, bestBR, bestBL, 1 - padXFraction, padYFraction);
+      gridBR = lerp2D(bestTL, bestTR, bestBR, bestBL, 1 - padXFraction, 1 - padYFraction);
+      gridBL = lerp2D(bestTL, bestTR, bestBR, bestBL, padXFraction, 1 - padYFraction);
+
+      useBilinearMapping = true;
+    }
+  }
+
   // First, sample each cell's raw RGB parameters to use for cell-level local adaptive thresholding
   const cellR = Array(h).fill(null).map(() => new Float32Array(w));
   const cellG = Array(h).fill(null).map(() => new Float32Array(w));
@@ -820,8 +939,21 @@ export function extractGridFromImage(
   
   for (let row = 0; row < h; row++) {
     for (let col = 0; col < w; col++) {
-      const cellCenterX = startX + Math.round(((col + 0.5) / w) * boxW);
-      const cellCenterY = startY + Math.round(((row + 0.5) / h) * boxH);
+      let cellCenterX = 0;
+      let cellCenterY = 0;
+
+      if (useBilinearMapping) {
+        // Perspective-correct bilinear grid center projection
+        const u = (col + 0.5) / w;
+        const v = (row + 0.5) / h;
+        const cellCenter = lerp2D(gridTL, gridTR, gridBR, gridBL, u, v);
+        cellCenterX = Math.round(cellCenter.x);
+        cellCenterY = Math.round(cellCenter.y);
+      } else {
+        // Classical linear fallback (assumes perfect camera alignment)
+        cellCenterX = startX + Math.round(((col + 0.5) / w) * boxW);
+        cellCenterY = startY + Math.round(((row + 0.5) / h) * boxH);
+      }
       
       let sumCellR = 0;
       let sumCellG = 0;

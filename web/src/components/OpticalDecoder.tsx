@@ -115,7 +115,9 @@ export default function OpticalDecoder() {
         setDevices(videoInputs);
         setHasCamera(true);
         if (videoInputs.length > 0) {
-          setSelectedDeviceId(videoInputs[0].deviceId);
+          // Identify back/rear camera to default to the primary environment lens
+          const backCam = videoInputs.find(d => /back|rear|environment|main/i.test(d.label));
+          setSelectedDeviceId(backCam ? backCam.deviceId : videoInputs[0].deviceId);
         }
         addLog('info', 'Webcam devices initialized successfully.');
       } catch (err) {
