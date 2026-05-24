@@ -423,6 +423,9 @@ export default function OpticalDecoder() {
     addLog('info', 'Receiver pipeline flushed. Ready to scan new sequence.');
   };
 
+  const activeDevice = devices.find(d => d.deviceId === selectedDeviceId);
+  const isFront = activeDevice ? !/back|rear|environment/i.test(activeDevice.label) : true;
+
   return (
     <div className="grid grid-cols-1 lg:grid-cols-12 gap-6" id="decoder-wrapper">
       {/* LEFT CAMERA VIEWPORT (7 columns) */}
@@ -472,11 +475,11 @@ export default function OpticalDecoder() {
           {/* MAIN WEBCAM SCREEN WITH TARGET INTERACTIVE BOUNDS */}
           <div className="my-5 bg-slate-950 rounded-xl relative overflow-hidden aspect-[4/3] flex items-center justify-center border border-slate-850" id="camera-lens-view">
             {isScanning ? (
-              <div className="relative w-full h-full flex items-center justify-center" id="viewport-scanner-frame">
+              <div className="absolute inset-0 w-full h-full block" id="viewport-scanner-frame">
                 <video 
                   ref={videoRef}
-                  className="absolute inset-0 w-full h-full"
-                  style={{ transform: 'scaleX(-1)', objectFit: 'cover' }}
+                  className="absolute inset-0 w-full h-full block"
+                  style={{ transform: isFront ? 'scaleX(-1)' : 'scaleX(1)', objectFit: 'cover' }}
                   playsInline
                   muted
                   autoPlay
