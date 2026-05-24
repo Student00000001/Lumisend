@@ -1,0 +1,8 @@
+{
+  "name": "Lumisend",
+  "description": "Transmit and receive files optically using 4:3 high-density binary 2D codes with custom alignment markers and real-time camera decoding.",
+  "requestFramePermissions": [
+    "camera"
+  ],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
