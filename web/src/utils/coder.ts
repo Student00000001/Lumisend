@@ -587,6 +587,86 @@ export function decodeFrameFromGrid(
 }
 
 /**
+ * Detects the bounding box of a high-contrast card inside a given target region.
+ * This is extremely useful for automatically locking onto the screen card bounds.
+ */
+export function detectHighContrastCard(
+  pixelData: Uint8ClampedArray,
+  width: number,
+  height: number,
+  startX: number,
+  startY: number,
+  boxW: number,
+  boxH: number
+): { x1: number; y1: number; x2: number; y2: number } | null {
+  let minL = 255;
+  let maxL = 0;
+  
+  // Sample a subset of pixels to find min and max luminance inside the target box
+  const stepY = Math.max(1, Math.floor(boxH / 40));
+  const stepX = Math.max(1, Math.floor(boxW / 40));
+  
+  for (let y = startY; y < startY + boxH; y += stepY) {
+    for (let x = startX; x < startX + boxW; x += stepX) {
+      if (x < 0 || x >= width || y < 0 || y >= height) continue;
+      const idx = (y * width + x) * 4;
+      const l = pixelData[idx] * 0.299 + pixelData[idx + 1] * 0.587 + pixelData[idx + 2] * 0.114;
+      if (l < minL) minL = l;
+      if (l > maxL) maxL = l;
+    }
+  }
+  
+  const contrast = maxL - minL;
+  // If contrast is very low, there's no high contrast screen card aligned here
+  if (contrast < 45) {
+    return null;
+  }
+  
+  // Find white/bright boundary of the codecard
+  const brightThreshold = minL + contrast * 0.55;
+  
+  let minXInside = startX + boxW;
+  let maxXInside = startX;
+  let minYInside = startY + boxH;
+  let maxYInside = startY;
+  
+  const scanStepY = Math.max(1, Math.floor(boxH / 80));
+  const scanStepX = Math.max(1, Math.floor(boxW / 80));
+  
+  for (let y = startY; y < startY + boxH; y += scanStepY) {
+    for (let x = startX; x < startX + boxW; x += scanStepX) {
+      if (x < 0 || x >= width || y < 0 || y >= height) continue;
+      const idx = (y * width + x) * 4;
+      const l = pixelData[idx] * 0.299 + pixelData[idx + 1] * 0.587 + pixelData[idx + 2] * 0.114;
+      if (l >= brightThreshold) {
+        if (x < minXInside) minXInside = x;
+        if (x > maxXInside) maxXInside = x;
+        if (y < minYInside) minYInside = y;
+        if (y > maxYInside) maxYInside = y;
+      }
+    }
+  }
+  
+  const cardW = maxXInside - minXInside;
+  const cardH = maxYInside - minYInside;
+  
+  // Ensure the detected card size is reasonable inside our guide reticle
+  if (cardW > boxW * 0.25 && cardH > boxH * 0.25) {
+    const padX = Math.round(cardW * 0.015);
+    const padY = Math.round(cardH * 0.015);
+    
+    return {
+      x1: Math.max(0, minXInside - padX) / width,
+      y1: Math.max(0, minYInside - padY) / height,
+      x2: Math.min(width - 1, maxXInside + padX) / width,
+      y2: Math.min(height - 1, maxYInside + padY) / height
+    };
+  }
+  
+  return null;
+}
+
+/**
  * Quiet zone white border detection helper
  */
 export function getQuietZoneBounds(
@@ -728,42 +808,26 @@ export function extractGridFromImage(
     return null;
   }
   
-  // Calculate independent R, G, B averages across target area for localized adaptive thresholding
-  let sumR = 0;
-  let sumG = 0;
-  let sumB = 0;
-  let sampleCount = 0;
+  // First, sample each cell's raw RGB parameters to use for cell-level local adaptive thresholding
+  const cellR = Array(h).fill(null).map(() => new Float32Array(w));
+  const cellG = Array(h).fill(null).map(() => new Float32Array(w));
+  const cellB = Array(h).fill(null).map(() => new Float32Array(w));
   
-  // Sub-sample grid for CPU speed
-  const step = Math.max(1, Math.floor(boxW / 100));
-  for (let y = startY; y < startY + boxH; y += step) {
-    for (let x = startX; x < startX + boxW; x += step) {
-      const idx = (y * width + x) * 4;
-      sumR += pixelData[idx];
-      sumG += pixelData[idx + 1];
-      sumB += pixelData[idx + 2];
-      sampleCount++;
-    }
-  }
-  
-  const thresholdR = sampleCount > 0 ? sumR / sampleCount : 128;
-  const thresholdG = sampleCount > 0 ? sumG / sampleCount : 128;
-  const thresholdB = sampleCount > 0 ? sumB / sampleCount : 128;
-  
-  // Sample a grid of cells using direct grid projection (w x h cells in ratio 4:3)
-  const grid: number[][] = Array(h).fill(null).map(() => Array(w).fill(0));
+  let globalSumR = 0;
+  let globalSumG = 0;
+  let globalSumB = 0;
+  let cellCountTotal = 0;
   
   for (let row = 0; row < h; row++) {
     for (let col = 0; col < w; col++) {
-      // Find center coordinate of this cell in the cropped box
       const cellCenterX = startX + Math.round(((col + 0.5) / w) * boxW);
       const cellCenterY = startY + Math.round(((row + 0.5) / h) * boxH);
       
-      // Sample 3x3 filter of pixels to reject sensor noise
       let sumCellR = 0;
       let sumCellG = 0;
       let sumCellB = 0;
-      let cellCount = 0;
+      let pixelCount = 0;
+      
       for (let dy = -1; dy <= 1; dy++) {
         for (let dx = -1; dx <= 1; dx++) {
           const px = cellCenterX + dx;
@@ -773,30 +837,101 @@ export function extractGridFromImage(
             sumCellR += pixelData[idx];
             sumCellG += pixelData[idx + 1];
             sumCellB += pixelData[idx + 2];
-            cellCount++;
+            pixelCount++;
           }
         }
       }
       
-      const avgCellR = cellCount > 0 ? sumCellR / cellCount : 128;
-      const avgCellG = cellCount > 0 ? sumCellG / cellCount : 128;
-      const avgCellB = cellCount > 0 ? sumCellB / cellCount : 128;
+      const avgCellR = pixelCount > 0 ? sumCellR / pixelCount : 128;
+      const avgCellG = pixelCount > 0 ? sumCellG / pixelCount : 128;
+      const avgCellB = pixelCount > 0 ? sumCellB / pixelCount : 128;
+      
+      cellR[row][col] = avgCellR;
+      cellG[row][col] = avgCellG;
+      cellB[row][col] = avgCellB;
+      
+      globalSumR += avgCellR;
+      globalSumG += avgCellG;
+      globalSumB += avgCellB;
+      cellCountTotal++;
+    }
+  }
+  
+  const globalThresholdR = cellCountTotal > 0 ? globalSumR / cellCountTotal : 128;
+  const globalThresholdG = cellCountTotal > 0 ? globalSumG / cellCountTotal : 128;
+  const globalThresholdB = cellCountTotal > 0 ? globalSumB / cellCountTotal : 128;
+  
+  // Second, resolve local adaptive threshold values by comparing with adjacent cell neighborhoods
+  const grid: number[][] = Array(h).fill(null).map(() => Array(w).fill(0));
+  const WINDOW_SIZE = 11;
+  const half = Math.floor(WINDOW_SIZE / 2);
+  
+  for (let row = 0; row < h; row++) {
+    for (let col = 0; col < w; col++) {
+      let localSumR = 0;
+      let localSumG = 0;
+      let localSumB = 0;
+      let localCount = 0;
+      let localMinR = 255;
+      let localMaxR = 0;
+      let localMinG = 255;
+      let localMaxG = 0;
+      let localMinB = 255;
+      let localMaxB = 0;
+      
+      const rStart = Math.max(0, row - half);
+      const rEnd = Math.min(h - 1, row + half);
+      const cStart = Math.max(0, col - half);
+      const cEnd = Math.min(w - 1, col + half);
+      
+      for (let r = rStart; r <= rEnd; r++) {
+        for (let c = cStart; c <= cEnd; c++) {
+          const vr = cellR[r][c];
+          const vg = cellG[r][c];
+          const vb = cellB[r][c];
+          
+          localSumR += vr;
+          localSumG += vg;
+          localSumB += vb;
+          localCount++;
+          
+          if (vr < localMinR) localMinR = vr;
+          if (vr > localMaxR) localMaxR = vr;
+          if (vg < localMinG) localMinG = vg;
+          if (vg > localMaxG) localMaxG = vg;
+          if (vb < localMinB) localMinB = vb;
+          if (vb > localMaxB) localMaxB = vb;
+        }
+      }
+      
+      const meanR = localSumR / localCount;
+      const meanG = localSumG / localCount;
+      const meanB = localSumB / localCount;
+      
+      const contrastR = localMaxR - localMinR;
+      const contrastG = localMaxG - localMinG;
+      const contrastB = localMaxB - localMinB;
+      
+      // Offset mean slightly downwards to cleanly handle noise threshold margins
+      const thresholdR = contrastR > 18 ? (meanR - 4) : globalThresholdR;
+      const thresholdG = contrastG > 18 ? (meanG - 4) : globalThresholdG;
+      const thresholdB = contrastB > 18 ? (meanB - 4) : globalThresholdB;
+      
+      const avgCellR = cellR[row][col];
+      const avgCellG = cellG[row][col];
+      const avgCellB = cellB[row][col];
       
       if (settings.colorMode === 'mono') {
-        // Standard monochrome mode: Combine R, G, B with ITU-R BT.601 weights for a robust color-neutral greyscale
         const cellLuminance = (avgCellR * 0.299) + (avgCellG * 0.587) + (avgCellB * 0.114);
         const thresholdLuminance = (thresholdR * 0.299) + (thresholdG * 0.587) + (thresholdB * 0.114);
         
-        // Active cell translates to dark/black (subtractive light, below luminance benchmark)
         const isActive = cellLuminance < thresholdLuminance;
         grid[row][col] = isActive ? 7 : 0;
       } else {
-        // Chromatic Color mode: Values below respective channel thresholds indicate active subtractive channel colors
         const isRedActive = avgCellR < thresholdR;
         const isGreenActive = avgCellG < thresholdG;
         const isBlueActive = avgCellB < thresholdB;
         
-        // Reconstruct cell value (0 to 7)
         grid[row][col] = (isRedActive ? 4 : 0) | (isGreenActive ? 2 : 0) | (isBlueActive ? 1 : 0);
       }
     }
@@ -824,14 +959,24 @@ export function extractAndDecodeWithJitter(
   alignGuideX2: number,
   alignGuideY2: number
 ): JitterResult | null {
-  // Let's resolve the actual physical guide coordinates we want to search around
   let g_x1 = alignGuideX1;
   let g_y1 = alignGuideY1;
   let g_x2 = alignGuideX2;
   let g_y2 = alignGuideY2;
 
-  // If we are scanning full image (static file), try our perfect quiet zone bunder detector first
-  if (alignGuideX1 === 0 && alignGuideY1 === 0 && alignGuideX2 === 1 && alignGuideY2 === 1) {
+  // Utilize our real-time high-contrast white card locator inside the camera guide target!
+  const targetX1 = Math.round(alignGuideX1 * width);
+  const targetY1 = Math.round(alignGuideY1 * height);
+  const targetBoxW = Math.round((alignGuideX2 - alignGuideX1) * width);
+  const targetBoxH = Math.round((alignGuideY2 - alignGuideY1) * height);
+  
+  const autoPos = detectHighContrastCard(pixelData, width, height, targetX1, targetY1, targetBoxW, targetBoxH);
+  if (autoPos) {
+    g_x1 = autoPos.x1;
+    g_y1 = autoPos.y1;
+    g_x2 = autoPos.x2;
+    g_y2 = autoPos.y2;
+  } else if (alignGuideX1 === 0 && alignGuideY1 === 0 && alignGuideX2 === 1 && alignGuideY2 === 1) {
     const qz = getQuietZoneBounds(pixelData, width, height);
     if (qz) {
       g_x1 = qz.x1;
